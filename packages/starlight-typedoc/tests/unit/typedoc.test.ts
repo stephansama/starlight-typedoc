@@ -1,7 +1,8 @@
 import * as fs from 'node:fs'
+import url from 'node:url'
 
 import type { AstroIntegrationLogger, AstroConfig } from 'astro'
-import { afterAll, afterEach, beforeAll, expect, test, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, type MockInstance, test, vi } from 'vitest'
 
 import type { StarlightTypeDocOptions } from '../..'
 import { generateTypeDoc } from '../../libs/typedoc'
@@ -114,17 +115,16 @@ test('should generate the doc in a custom output directory relative to `src/cont
   )
 })
 
-test('should not add `README.md` module files for multiple entry points', async () => {
+test('should include `index.md` files for multiple entry points', async () => {
   await generateTestTypeDoc({
     ...starlightTypeDocOptions,
     entryPoints: ['../../fixtures/basics/src/Bar.ts', '../../fixtures/basics/src/Foo.ts'],
   })
 
-  const rmSyncSpy = vi.mocked(fs.rmSync)
-  const filePaths = rmSyncSpy.mock.calls.map((call) => call[0].toString())
+  const writeFileSyncSpy = vi.mocked(fs.writeFileSync)
+  const filePaths = writeFileSyncSpy.mock.calls.map((call) => call[0].toString())
 
-  expect(rmSyncSpy).toHaveBeenCalled()
-  expect(filePaths.filter((filePath) => /\/(?:Bar|Foo)\/README\.md$/.test(filePath)).length).toBe(2)
+  expect(filePaths.filter((filePath) => /\/(?:Bar|Foo)\/index\.md$/.test(filePath)).length).toBe(2)
 })
 
 test('should support overriding typedoc-plugin-markdown readme page generation', async () => {
@@ -141,7 +141,7 @@ test('should support overriding typedoc-plugin-markdown readme page generation',
   const filePaths = writeFileSyncSpy.mock.calls.map((call) => call[0].toString())
 
   expect(filePaths.some((filePath) => filePath.endsWith('modules.md'))).toBe(true)
-  expect(filePaths.some((filePath) => filePath.endsWith('README.md'))).toBe(true)
+  expect(filePaths.some((filePath) => filePath.endsWith('index.md'))).toBe(true)
 })
 
 test('should output modules with index', async () => {
@@ -215,3 +215,160 @@ function generateTestTypeDoc(
     } as unknown as AstroIntegrationLogger,
   )
 }
+
+// AstroConfig with root pointing to a directory that has no typedoc.json
+const starlightTypeDocAstroConfigWithRoot: Partial<AstroConfig> = {
+  srcDir: new URL('src', import.meta.url),
+  root: new URL('.', import.meta.url),
+}
+
+function makeTestLogger(): AstroIntegrationLogger {
+  return {
+    info() {
+      // noop
+    },
+    warn() {
+      // noop
+    },
+  } as unknown as AstroIntegrationLogger
+}
+
+describe('typedoc.json file support', () => {
+  test('should load TypeDoc options from typedoc.json', async () => {
+    // fixture: { "excludeNotDocumented": true } → noDocs.ts has no docs → throws
+    const root = new URL('__fixtures__/exclude-not-documented/', import.meta.url)
+
+    await expect(
+      generateTypeDoc(
+        {
+          ...starlightTypeDocOptions,
+          entryPoints: ['../../fixtures/basics/src/noDocs.ts'],
+        },
+        { ...starlightTypeDocAstroConfigWithRoot, root } as AstroConfig,
+        makeTestLogger(),
+      ),
+    ).rejects.toThrowErrorMatchingInlineSnapshot(`[Error: Failed to generate TypeDoc documentation.]`)
+  })
+
+  test('should allow explicit typeDoc options to override typedoc.json', async () => {
+    // fixture has excludeNotDocumented: true, but plugin sets it to false → should succeed
+    const root = new URL('__fixtures__/exclude-not-documented/', import.meta.url)
+
+    await expect(
+      generateTypeDoc(
+        {
+          ...starlightTypeDocOptions,
+          entryPoints: ['../../fixtures/basics/src/noDocs.ts'],
+          typeDoc: { ...starlightTypeDocOptions.typeDoc, excludeNotDocumented: false },
+        },
+        { ...starlightTypeDocAstroConfigWithRoot, root } as AstroConfig,
+        makeTestLogger(),
+      ),
+    ).resolves.not.toThrow()
+  })
+
+  test('should load entryPoints and tsconfig from typedoc.json when not provided in plugin options', async () => {
+    // fixture: { "entryPoints": [...], "tsconfig": "...", "logLevel": 4 }
+    const root = new URL('__fixtures__/with-entry-points/', import.meta.url)
+
+    await expect(
+      generateTypeDoc({}, { ...starlightTypeDocAstroConfigWithRoot, root } as AstroConfig, makeTestLogger()),
+    ).resolves.not.toThrow()
+  })
+
+  test('should prefer plugin option entryPoints and tsconfig over typedoc.json', async () => {
+    // fixture provides noExports.ts (would cause NoReflectionsError); plugin provides functions.ts
+    const root = new URL('__fixtures__/with-bad-entry-point/', import.meta.url)
+
+    await expect(
+      generateTypeDoc(
+        {
+          entryPoints: ['../../fixtures/basics/src/functions.ts'],
+          tsconfig: '../../fixtures/basics/tsconfig.json',
+          typeDoc: { logLevel: 4 },
+        },
+        { ...starlightTypeDocAstroConfigWithRoot, root } as AstroConfig,
+        makeTestLogger(),
+      ),
+    ).resolves.not.toThrow()
+  })
+
+  test('should throw if entryPoints is missing from both plugin options and typedoc.json', async () => {
+    await expect(
+      generateTypeDoc(
+        { tsconfig: '../../fixtures/basics/tsconfig.json' },
+        starlightTypeDocAstroConfigWithRoot as AstroConfig,
+        makeTestLogger(),
+      ),
+    ).rejects.toThrow('No `entryPoints` provided.')
+  })
+
+  test('should throw if tsconfig is missing from both plugin options and typedoc.json', async () => {
+    await expect(
+      generateTypeDoc(
+        { entryPoints: ['../../fixtures/basics/src/functions.ts'] },
+        starlightTypeDocAstroConfigWithRoot as AstroConfig,
+        makeTestLogger(),
+      ),
+    ).rejects.toThrow('No `tsconfig` provided.')
+  })
+})
+
+describe('typedoc.json resolution precedence', () => {
+  const realCwd = process.cwd()
+  let cwdSpy: MockInstance<() => string>
+
+  beforeEach(() => {
+    cwdSpy = vi.spyOn(process as unknown as { cwd: () => string }, 'cwd').mockReturnValue(realCwd)
+  })
+
+  afterEach(() => {
+    cwdSpy.mockRestore()
+  })
+
+  test('should prefer typedoc.json next to process.cwd() over the one at the Astro project root', async () => {
+    // cwd has `excludeNotDocumented: true`; if applied, noDocs.ts produces no reflections → throws.
+    // root has a valid typedoc.json (no excludeNotDocumented); if the root file were picked instead,
+    // the call would succeed.
+    cwdSpy.mockReturnValue(url.fileURLToPath(new URL('__fixtures__/exclude-not-documented/', import.meta.url)))
+
+    // Use absolute paths since typedoc resolves entry points relative to the (spied) cwd.
+    const absoluteEntryPoint = url.fileURLToPath(new URL('../../../../fixtures/basics/src/noDocs.ts', import.meta.url))
+    const absoluteTsconfig = url.fileURLToPath(new URL('../../../../fixtures/basics/tsconfig.json', import.meta.url))
+
+    await expect(
+      generateTypeDoc(
+        { ...starlightTypeDocOptions, entryPoints: [absoluteEntryPoint], tsconfig: absoluteTsconfig },
+        {
+          ...starlightTypeDocAstroConfigWithRoot,
+          root: new URL('__fixtures__/with-entry-points/', import.meta.url),
+        } as AstroConfig,
+        makeTestLogger(),
+      ),
+    ).rejects.toThrowErrorMatchingInlineSnapshot(`[Error: Failed to generate TypeDoc documentation.]`)
+  })
+
+  test('should fall back to the Astro project root when no typedoc.json exists next to process.cwd()', async () => {
+    // cwd defaults to the package dir which has no typedoc.json; root provides one with entryPoints.
+    await expect(
+      generateTypeDoc(
+        {},
+        {
+          ...starlightTypeDocAstroConfigWithRoot,
+          root: new URL('__fixtures__/with-entry-points/', import.meta.url),
+        } as AstroConfig,
+        makeTestLogger(),
+      ),
+    ).resolves.not.toThrow()
+  })
+
+  test('should behave as if no typedoc.json exists when neither cwd nor root contain one', async () => {
+    await expect(
+      generateTypeDoc(
+        { tsconfig: '../../fixtures/basics/tsconfig.json' },
+        starlightTypeDocAstroConfigWithRoot as AstroConfig,
+        makeTestLogger(),
+      ),
+    ).rejects.toThrow('No `entryPoints` provided.')
+  })
+})

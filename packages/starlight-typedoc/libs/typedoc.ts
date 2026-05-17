@@ -20,6 +20,7 @@ import type { StarlightTypeDocOptions } from '..'
 
 import { StarlightTypeDocLogger } from './logger'
 import { addFrontmatter } from './markdown'
+import { StarlightTypeDocMemberRouter, StarlightTypeDocModuleRouter } from './router'
 import { getRelativeURL, getStarlightTypeDocOutputDirectory } from './starlight'
 import { StarlightTypeDocTheme } from './theme'
 
@@ -33,6 +34,7 @@ const defaultTypeDocConfig: TypeDocConfig = {
 }
 
 const markdownPluginConfig: TypeDocConfig = {
+  entryFileName: 'index.md',
   hideBreadcrumbs: true,
   hidePageHeader: true,
   hidePageTitle: true,
@@ -45,10 +47,31 @@ export async function generateTypeDoc(
 ) {
   const outputDirectory = options.output ?? 'api'
 
+  const {
+    entryPoints: jsonEntryPoints,
+    tsconfig: jsonTsconfig,
+    ...typeDocJsonConfig
+  } = loadTypeDocJsonFile(process.cwd(), config.root)
+
+  const entryPoints = options.entryPoints ?? jsonEntryPoints
+  const tsconfig = options.tsconfig ?? jsonTsconfig
+
+  if (!entryPoints) {
+    throw new Error(
+      'No `entryPoints` provided. Specify them in the plugin options or in a `typedoc.json` file at the project root.',
+    )
+  }
+  if (!tsconfig) {
+    throw new Error(
+      'No `tsconfig` provided. Specify it in the plugin options or in a `typedoc.json` file at the project root.',
+    )
+  }
+
   const app = await bootstrapApp(
-    options.entryPoints,
-    options.tsconfig,
+    entryPoints,
+    tsconfig,
     options.typeDoc,
+    typeDocJsonConfig as TypeDocConfig,
     {
       base: config.base,
       directory: outputDirectory,
@@ -95,6 +118,7 @@ async function bootstrapApp(
   entryPoints: NonNullable<TypeDocOptions['entryPoints']>,
   tsconfig: NonNullable<TypeDocOptions['tsconfig']>,
   config: TypeDocConfig = {},
+  typeDocJsonConfig: TypeDocConfig = {},
   output: TypeDocOutput,
   pagination: boolean,
   logger: AstroIntegrationLogger,
@@ -105,15 +129,27 @@ async function bootstrapApp(
   const app = await Application.bootstrapWithPlugins({
     ...defaultTypeDocConfig,
     ...markdownPluginConfig,
+    ...typeDocJsonConfig,
     ...config,
     // typedoc-plugin-markdown must be applied here so that it isn't overwritten by any additional applied plugins
-    plugin: [...(config.plugin ?? []), 'typedoc-plugin-markdown'],
+    plugin: [...(typeDocJsonConfig.plugin ?? []), ...(config.plugin ?? []), 'typedoc-plugin-markdown'],
     entryPoints,
     tsconfig,
     outputs: [{ name: 'markdown', path: output.path }],
   })
   app.logger = new StarlightTypeDocLogger(logger)
   app.options.addReader(new TSConfigReader())
+  app.renderer.defineRouter('starlight-typedoc-member', StarlightTypeDocMemberRouter)
+  app.renderer.defineRouter('starlight-typedoc-module', StarlightTypeDocModuleRouter)
+  if (!app.options.isSet('router')) {
+    const outputFileStrategy = app.options.isSet('outputFileStrategy')
+      ? app.options.getValue('outputFileStrategy')
+      : 'members'
+    app.options.setValue(
+      'router',
+      outputFileStrategy === 'modules' ? 'starlight-typedoc-module' : 'starlight-typedoc-member',
+    )
+  }
   app.renderer.defineTheme('starlight-typedoc', StarlightTypeDocTheme)
   app.renderer.on(PageEvent.BEGIN, (event) => {
     onRendererPageBegin(event as MarkdownPageEvent, outputDirectory, pagination)
@@ -153,12 +189,6 @@ function onRendererPageBegin(event: MarkdownPageEvent, outputDirectory: string, 
 function onRendererPageEnd(event: MarkdownPageEvent, outputDirectory: string, pagination: boolean) {
   if (!event.contents) {
     return false
-  } else if (/^.+[/\\]README\.md$/.test(event.url)) {
-    // Do not save `README.md` files for multiple entry points.
-    // It is no longer supported in TypeDoc 0.26.0 to call `event.preventDefault()` to prevent the file from being saved.
-    // https://github.com/TypeStrong/typedoc/commit/6e6b3b662c92b3d4bc24b6c6c0c6e227e063c759
-    // event.preventDefault()
-    return true
   }
 
   if (!event.frontmatter) {
@@ -197,6 +227,21 @@ function getModelFrontmatter(
   return frontmatter
 }
 
+function loadTypeDocJsonFile(...candidates: (URL | string | undefined)[]): TypeDocJsonFile {
+  for (const candidate of candidates) {
+    if (!candidate) continue
+    try {
+      const base = candidate instanceof URL ? url.fileURLToPath(candidate) : candidate
+      const configPath = path.join(base, 'typedoc.json')
+      if (!fs.existsSync(configPath)) continue
+      return JSON.parse(fs.readFileSync(configPath, 'utf8')) as TypeDocJsonFile
+    } catch {
+      continue
+    }
+  }
+  return {}
+}
+
 export class NoReflectionsError extends Error {
   constructor() {
     super('Failed to generate TypeDoc documentation.')
@@ -205,6 +250,8 @@ export class NoReflectionsError extends Error {
 
 export type TypeDocConfig = Partial<Omit<TypeDocOptions, 'entryPoints' | 'tsconfig'> & PluginOptions>
 export type TypeDocDefinitions = Record<string, PageDefinition['url']>
+
+type TypeDocJsonFile = Partial<TypeDocOptions & PluginOptions>
 
 interface TypeDocOutput {
   base: string

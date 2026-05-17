@@ -41,6 +41,7 @@ test('should generate the proper items for for a single entry point', async ({ d
   const items = await docPage.getTypeDocSidebarItems()
 
   expect(items).toMatchObject([
+    { name: 'Overview' },
     {
       label: 'Enumerations',
       items: [{ name: 'ANumericEnum' }, { name: 'AStringEnum' }],
@@ -95,9 +96,11 @@ test('should generate the proper items for for multiple entry points', async ({ 
   const items = await docPage.getTypeDocSidebarItems()
 
   expect(items).toMatchObject([
+    { name: 'README' },
     {
       label: 'Bar',
       items: [
+        { name: 'Overview' },
         {
           label: 'Classes',
           items: [{ name: 'Bar' }],
@@ -108,6 +111,7 @@ test('should generate the proper items for for multiple entry points', async ({ 
     {
       label: 'Foo',
       items: [
+        { name: 'Overview' },
         {
           label: 'Classes',
           items: [{ name: 'Foo' }],
